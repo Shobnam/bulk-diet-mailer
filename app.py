@@ -47,7 +47,7 @@ with tab1:
         st.dataframe(df.head(5), use_container_width=True)
 
         # PDF Mapping Dictionary
-        pdf_dict = {file.name: file for file in uploaded_pdfs}
+        pdf_dict = {file.name.strip(): file for file in uploaded_pdfs}
 
         if st.button("🚀 Send Diet Charts to All Patients", type="primary"):
             if not app_password:
@@ -71,7 +71,17 @@ with tab1:
                         p_name = str(row['Name']).strip()
                         p_email = str(row['Email']).strip()
                         p_id = str(row['PatientID']).strip()
-                        pdf_name = str(row['PDF_Path']).strip()
+                        
+                        # Automatic Naming Format: Diet_chart_P12345.pdf
+                        if 'PDF_Path' in df.columns and pd.notna(row['PDF_Path']) and str(row['PDF_Path']).strip() != "":
+                            raw_path = str(row['PDF_Path']).strip()
+                            if raw_path.endswith('.pdf'):
+                                target_pdf_name = raw_path
+                            else:
+                                target_pdf_name = f"{raw_path}.pdf"
+                        else:
+                            # Automatically formats using PatientID (e.g., Diet_chart_P12345.pdf)
+                            target_pdf_name = f"Diet_chart_{p_id}.pdf"
 
                         # Capture Live Timestamp at the moment of sending
                         live_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -96,8 +106,9 @@ Diet & Health Team
                         msg.attach(MIMEText(body, 'plain'))
 
                         # Attach PDF from memory
-                        if pdf_name in pdf_dict:
-                            pdf_file = pdf_dict[pdf_name]
+                        if target_pdf_name in pdf_dict:
+                            pdf_file = pdf_dict[target_pdf_name]
+                            pdf_file.seek(0)
                             part = MIMEBase('application', 'octet-stream')
                             part.set_payload(pdf_file.read())
                             encoders.encode_base64(part)
@@ -112,7 +123,7 @@ Diet & Health Team
                             except Exception as err:
                                 df.at[index, 'Status'] = f"Failed: {err}"
                         else:
-                            df.at[index, 'Status'] = "Failed: PDF Missing"
+                            df.at[index, 'Status'] = f"Failed: PDF '{target_pdf_name}' Missing"
 
                         # Update Progress Bar
                         progress_bar.progress((index + 1) / total_patients)
@@ -139,7 +150,7 @@ with tab2:
             label="📥 Download Timestamp Report (CSV)",
             data=csv_data,
             file_name=f"diet_chart_delivery_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv"
+            mime="text/css" if False else "text/csv"
         )
     else:
         st.info("No execution record found yet. Please run the dispatch process in the 'Send Bulk Emails' tab.")
