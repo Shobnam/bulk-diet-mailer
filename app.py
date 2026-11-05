@@ -1,8 +1,6 @@
 import os
 import time
 import smtplib
-import zipfile
-import io
 import pandas as pd
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
@@ -25,7 +23,7 @@ st.markdown("---")
 # Sidebar - Settings
 st.sidebar.header("⚙️ Sender Email Configuration")
 sender_email = st.sidebar.text_input("Sender Email Address", value="yourclinic@gmail.com")
-app_password = st.sidebar.text_input("Google App Password", type="password", help="Enter your 16-digit Google App Password.")
+app_password = st.sidebar.text_input("Google App Password", type="password", help="Enter your 16-digit Google App Password from Account Security settings.")
 smtp_server = st.sidebar.text_input("SMTP Host", value="smtp.gmail.com")
 smtp_port = st.sidebar.number_input("SMTP Port", value=587)
 
@@ -37,16 +35,19 @@ with tab1:
     
     with col1:
         st.subheader("1. Patient List (CSV)")
-        uploaded_csv = st.file_uploader("Upload Patient CSV File (Name, Email, PatientID)", type=["csv"])
+        uploaded_csv = st.file_uploader("Upload Patient CSV File", type=["csv"])
         
     with col2:
-        st.subheader("2. All PDFs ZIP Folder")
-        uploaded_zip = st.file_uploader("Upload ZIP file containing all Patient PDFs", type=["zip"])
+        st.subheader("2. Diet Chart PDFs")
+        uploaded_pdfs = st.file_uploader("Drag & Drop All Patient PDFs", type=["pdf"], accept_multiple_files=True)
 
-    if uploaded_csv and uploaded_zip:
+    if uploaded_csv and uploaded_pdfs:
         df = pd.read_csv(uploaded_csv)
         st.success(f"✅ Loaded {len(df)} patient records successfully.")
         st.dataframe(df.head(5), use_container_width=True)
+
+        # PDF Mapping Dictionary
+        pdf_dict = {file.name: file for file in uploaded_pdfs}
 
         if st.button("🚀 Send Diet Charts to All Patients", type="primary"):
             if not app_password:
@@ -58,11 +59,8 @@ with tab1:
                 df["Status"] = "Pending"
                 df["Sent_At_Timestamp"] = ""
 
+                # Connect to SMTP Server
                 try:
-                    # Extract ZIP contents into memory dictionary
-                    pdf_zip = zipfile.ZipFile(uploaded_zip)
-                    zip_files = {name.split('/')[-1]: pdf_zip.read(name) for name in pdf_zip.namelist() if name.endswith('.pdf')}
-
                     server = smtplib.SMTP(smtp_server, int(smtp_port))
                     server.starttls()
                     server.login(sender_email, app_password)
@@ -73,14 +71,15 @@ with tab1:
                         p_name = str(row['Name']).strip()
                         p_email = str(row['Email']).strip()
                         p_id = str(row['PatientID']).strip()
-                        
-                        # Automatically map PDF name using Patient ID (e.g., P65346.pdf)
-                        target_pdf_name = f"{p_id}.pdf"
+                        pdf_name = str(row['PDF_Path']).strip()
 
+                        # Capture Live Timestamp at the moment of sending
                         live_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                        # Update Status UI text with live time tick
                         status_text.markdown(f"⏳ **[{live_now}]** Processing ({index + 1}/{total_patients}): **{p_name}** (`{p_id}`)...")
 
-                        # Email Construction
+                        # Email Message Construction
                         msg = MIMEMultipart()
                         msg['From'] = f"Diet & Health Clinic <{sender_email}>"
                         msg['To'] = p_email
@@ -96,11 +95,11 @@ Diet & Health Team
 """
                         msg.attach(MIMEText(body, 'plain'))
 
-                        # Attach PDF if found in ZIP
-                        if target_pdf_name in zip_files:
-                            pdf_bytes = zip_files[target_pdf_name]
+                        # Attach PDF from memory
+                        if pdf_name in pdf_dict:
+                            pdf_file = pdf_dict[pdf_name]
                             part = MIMEBase('application', 'octet-stream')
-                            part.set_payload(pdf_bytes)
+                            part.set_payload(pdf_file.read())
                             encoders.encode_base64(part)
                             part.add_header('Content-Disposition', f'attachment; filename="Diet_Chart_{p_id}.pdf"')
                             msg.attach(part)
@@ -113,17 +112,20 @@ Diet & Health Team
                             except Exception as err:
                                 df.at[index, 'Status'] = f"Failed: {err}"
                         else:
-                            df.at[index, 'Status'] = "Failed: PDF Missing in ZIP"
+                            df.at[index, 'Status'] = "Failed: PDF Missing"
 
+                        # Update Progress Bar
                         progress_bar.progress((index + 1) / total_patients)
                         time.sleep(0.05)
 
                     server.quit()
-                    st.success("🎉 Process complete! All emails have been dispatched successfully.")
+                    st.success("🎉 Process complete! All emails have been dispatched with live timestamps.")
+                    
+                    # Store result in Session State
                     st.session_state['report_df'] = df
 
                 except Exception as conn_err:
-                    st.error(f"Error: {conn_err}")
+                    st.error(f"SMTP Connection Error: {conn_err}")
 
 with tab2:
     st.subheader("📊 Delivery Report with Live Timestamps")
@@ -131,6 +133,7 @@ with tab2:
         report_df = st.session_state['report_df']
         st.dataframe(report_df, use_container_width=True)
 
+        # Download Report CSV
         csv_data = report_df.to_csv(index=False).encode('utf-8')
         st.download_button(
             label="📥 Download Timestamp Report (CSV)",
