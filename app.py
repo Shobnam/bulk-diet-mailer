@@ -1,540 +1,769 @@
-import os
 import time
 import smtplib
 import pandas as pd
+import streamlit as st
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
-import streamlit as st
+from email.mime.application import MIMEApplication
+from email.utils import formataddr, parseaddr
 
-
-# Page Configuration
+=========================================================
+PAGE CONFIG
+=========================================================
 st.set_page_config(
-    page_title="Diet Chart Bulk Emailer",
-    page_icon="📋",
-    layout="wide"
+page_title="Diet Chart Bulk Emailer",
+page_icon="📋",
+layout="wide"
 )
-
-
-# Header with Live Time Display
 st.title("📋 Bulk Patient Diet Chart Mailer")
-
-live_time_placeholder = st.empty()
-
-current_time_str = datetime.now().strftime(
-    "%d-%b-%Y | %I:%M:%S %p"
+st.markdown(
+f"⏱️ System Current Time: "
+f"`{datetime.now().strftime('%d-%b-%Y | %I:%M:%S %p')}`"
 )
-
-live_time_placeholder.markdown(
-    f"⏱️ **System Current Time:** `{current_time_str}`"
-)
-
 st.markdown("---")
 
+=========================================================
+MICROSOFT 365 SMTP SETTINGS
+=========================================================
+SMTP_SERVER = "smtp.office365.com"
+SMTP_PORT = 587
 
-# Sidebar - Settings
-st.sidebar.header("⚙️ Sender Email Configuration")
+=========================================================
+SESSION STATE
+=========================================================
+if "login_verified" not in st.session_state:
+st.session_state["login_verified"] = False
+if "verified_email" not in st.session_state:
+st.session_state["verified_email"] = ""
+if "report_df" not in st.session_state:
+st.session_state["report_df"] = None
 
-sender_email = st.sidebar.text_input(
-    "Sender Email Address",
-    value="yourclinic@gmail.com"
+=========================================================
+FUNCTIONS
+=========================================================
+def clean_patient_id(value):
+if pd.isna(value):
+return ""
+patient_id = str(value).strip()
+if patient_id.endswith(".0"):
+patient_id = patient_id[:-2]
+return patient_id
+
+def is_valid_email(email_address):
+if not email_address:
+return False
+parsed_email = parseaddr(email_address)[1]
+if "@" not in parsed_email:
+return False
+domain = parsed_email.split("@")[-1]
+return "." in domain
+
+def connect_outlook(sender_email, sender_password):
+server = smtplib.SMTP(
+SMTP_SERVER,
+SMTP_PORT,
+timeout=60
 )
-
-app_password = st.sidebar.text_input(
-    "Google App Password",
-    type="password",
-    help=(
-        "Enter your 16-digit Google App Password "
-        "from Account Security settings."
-    )
+server.ehlo()
+server.starttls()
+server.ehlo()
+server.login(
+sender_email.strip(),
+sender_password
 )
+return server
 
-smtp_server = st.sidebar.text_input(
-    "SMTP Host",
-    value="smtp.gmail.com"
+def create_email(
+sender_email,
+sender_name,
+patient_name,
+patient_email,
+patient_id,
+pdf_name,
+pdf_content
+):
+message = MIMEMultipart()
+message["From"] = formataddr(
+(sender_name, sender_email)
 )
-
-smtp_port = st.sidebar.number_input(
-    "SMTP Port",
-    value=587
+message["To"] = patient_email
+message["Subject"] = (
+f"Your Personalized Diet Chart - "
+f"Patient ID: {patient_id}"
 )
-
-
-# Main UI Tabs
-tab1, tab2 = st.tabs(
-    [
-        "📤 Send Bulk Emails",
-        "📊 Delivery Reports"
-    ]
-)
-
-
-# =========================================================
-# TAB 1
-# =========================================================
-with tab1:
-
-    col1, col2 = st.columns([1, 1])
-
-    with col1:
-
-        st.subheader(
-            "1. Patient List (CSV / Excel)"
-        )
-
-        uploaded_file = st.file_uploader(
-            "Upload Patient File",
-            type=["csv", "xlsx", "xls"]
-        )
-
-    with col2:
-
-        st.subheader(
-            "2. Diet Chart PDFs"
-        )
-
-        uploaded_pdfs = st.file_uploader(
-            "Drag & Drop All Patient PDFs",
-            type=["pdf"],
-            accept_multiple_files=True
-        )
-
-
-    if uploaded_file and uploaded_pdfs:
-
-        # Read CSV or Excel dynamically
-        file_extension = (
-            uploaded_file.name
-            .split(".")[-1]
-            .lower()
-        )
-
-        try:
-
-            if file_extension == "csv":
-
-                df = pd.read_csv(
-                    uploaded_file
-                )
-
-            elif file_extension in [
-                "xlsx",
-                "xls"
-            ]:
-
-                df = pd.read_excel(
-                    uploaded_file
-                )
-
-            else:
-
-                st.error(
-                    "Unsupported file format!"
-                )
-
-                st.stop()
-
-        except Exception as read_err:
-
-            st.error(
-                f"Error reading file: {read_err}"
-            )
-
-            st.stop()
-
-
-        # PDF Dictionary
-        pdf_dict = {
-            file.name.strip(): file
-            for file in uploaded_pdfs
-        }
-
-
-        # =================================================
-        # PRE-CHECK PDF MATCHING
-        # =================================================
-        df["Expected_PDF"] = (
-            df["PatientID"]
-            .astype(str)
-            .str.strip()
-            .apply(
-                lambda x:
-                f"Diet_chart_{x}.pdf"
-            )
-        )
-
-
-        df["PDF_Found"] = (
-            df["Expected_PDF"]
-            .isin(
-                pdf_dict.keys()
-            )
-        )
-
-
-        matched_count = int(
-            df["PDF_Found"].sum()
-        )
-
-        missing_count = (
-            len(df) - matched_count
-        )
-
-
-        st.info(
-            f"📂 **Pre-Check Summary:** "
-            f"Total Records: {len(df)} | "
-            f"✅ Matched PDFs: {matched_count} | "
-            f"⚠️ Mismatch/Missing PDFs: {missing_count}"
-        )
-
-
-        if missing_count > 0:
-
-            st.warning(
-                "⚠️ Kuch patients ke liye matching PDF "
-                "nahi mili hai. Niche table mein check karein:"
-            )
-
-
-            st.dataframe(
-                df[
-                    [
-                        "Name",
-                        "Email",
-                        "PatientID",
-                        "Expected_PDF",
-                        "PDF_Found"
-                    ]
-                ],
-                use_container_width=True
-            )
-
-        else:
-
-            st.success(
-                "🎉 Sabhi patients ki PDFs successfully "
-                "match ho gayi hain! "
-                "Aap email send kar sakte hain."
-            )
-
-
-            st.dataframe(
-                df.head(5),
-                use_container_width=True
-            )
-
-
-        # =================================================
-        # SEND BUTTON
-        # =================================================
-        if st.button(
-            "🚀 Send Diet Charts to All Patients",
-            type="primary"
-        ):
-
-            if not app_password:
-
-                st.error(
-                    "Please enter your App Password "
-                    "in the sidebar settings!"
-                )
-
-            else:
-
-                progress_bar = st.progress(0)
-
-                status_text = st.empty()
-
-
-                df["Status"] = "Pending"
-
-                df["Sent_At_Timestamp"] = ""
-
-
-                # =========================================
-                # CONNECT TO GMAIL SMTP
-                # =========================================
-                try:
-
-                    server = smtplib.SMTP(
-                        smtp_server,
-                        int(smtp_port)
-                    )
-
-                    server.starttls()
-
-                    server.login(
-                        sender_email,
-                        app_password
-                    )
-
-
-                    total_patients = len(df)
-
-
-                    # =====================================
-                    # LOOP THROUGH PATIENTS
-                    # =====================================
-                    for index, row in df.iterrows():
-
-                        patient_name = str(
-                            row["Name"]
-                        ).strip()
-
-
-                        patient_email = str(
-                            row["Email"]
-                        ).strip()
-
-
-                        patient_id = str(
-                            row["PatientID"]
-                        ).strip()
-
-
-                        target_pdf_name = (
-                            row["Expected_PDF"]
-                        )
-
-
-                        live_now = (
-                            datetime.now()
-                            .strftime(
-                                "%Y-%m-%d %H:%M:%S"
-                            )
-                        )
-
-
-                        status_text.markdown(
-                            f"⏳ **[{live_now}]** "
-                            f"Processing "
-                            f"({index + 1}/{total_patients}): "
-                            f"**{patient_name}** "
-                            f"(`{patient_id}`)..."
-                        )
-
-
-                        # =================================
-                        # EMAIL MESSAGE
-                        # =================================
-                        msg = MIMEMultipart()
-
-
-                        msg["From"] = (
-                            f"Diet & Health Clinic "
-                            f"<{sender_email}>"
-                        )
-
-
-                        msg["To"] = patient_email
-
-
-                        msg["Subject"] = (
-                            "Your Personalized Diet Chart - "
-                            f"Patient ID: #{patient_id}"
-                        )
-
-
-                        body = f"""Hello {patient_name},
-
-Your personalized diet chart (Patient ID: {patient_id}) is attached to this email.
-
+body = f"""Hello {patient_name},
+Your personalized diet chart for Patient ID {patient_id} is attached to this email.
 Please review the attached PDF document for your detailed nutrition guidelines.
-
+If you have any questions regarding your diet chart, please contact your assigned health coach.
 Regards,
 Diet & Health Team
 """
+message.attach(
+MIMEText(
+body,
+"plain",
+"utf-8"
+)
+)
+attachment = MIMEApplication(
+pdf_content,
+_subtype="pdf"
+)
+attachment.add_header(
+"Content-Disposition",
+"attachment",
+filename=pdf_name
+)
+message.attach(attachment)
+return message
 
+=========================================================
+SIDEBAR LOGIN
+=========================================================
+st.sidebar.header("🔐 Microsoft 365 Sender Login")
+sender_name = st.sidebar.text_input(
+"Sender Display Name",
+value="Diet & Health Team"
+)
+sender_email = st.sidebar.text_input(
+"Work Email ID",
+placeholder="yourname@company.com"
+).strip()
+sender_password = st.sidebar.text_input(
+"Password",
+type="password",
+placeholder="Enter work email password"
+)
+email_delay = st.sidebar.number_input(
+"Delay Between Emails (seconds)",
+min_value=0.0,
+max_value=30.0,
+value=1.0,
+step=0.5
+)
+st.sidebar.caption(
+"Microsoft 365 SMTP: smtp.office365.com | Port 587 | STARTTLS"
+)
 
-                        msg.attach(
-                            MIMEText(
-                                body,
-                                "plain"
-                            )
-                        )
+=========================================================
+RESET LOGIN IF EMAIL CHANGES
+=========================================================
+if (
+st.session_state["verified_email"]
+and sender_email != st.session_state["verified_email"]
+):
+st.session_state["login_verified"] = False
+st.session_state["verified_email"] = ""
 
+=========================================================
+TEST LOGIN
+=========================================================
+if st.sidebar.button(
+"🔐 Test Outlook Login",
+use_container_width=True
+):
+st.session_state["login_verified"] = False
+st.session_state["verified_email"] = ""
+if not sender_email:
+st.sidebar.error(
+"Work Email ID enter karein."
+)
+elif not is_valid_email(sender_email):
+st.sidebar.error(
+"Valid Email ID enter karein."
+)
+elif not sender_password:
+st.sidebar.error(
+"Password enter karein."
+)
+else:
+test_server = None
+try:
+with st.sidebar:
+with st.spinner(
+"Microsoft 365 login check ho raha hai..."
+):
+test_server = connect_outlook(
+sender_email,
+sender_password
+)
+st.session_state["login_verified"] = True
+st.session_state["verified_email"] = sender_email
+st.sidebar.success(
+"✅ Outlook login successful."
+)
+except smtplib.SMTPAuthenticationError as error:
+st.sidebar.error(
+"❌ Authentication failed. "
+"Email/password check karein ya confirm karein "
+"ki Authenticated SMTP enable ho chuka hai."
+)
+st.sidebar.code(str(error))
+except Exception as error:
+st.sidebar.error(
+"❌ Microsoft 365 connection failed."
+)
+st.sidebar.code(str(error))
+finally:
+if test_server is not None:
+try:
+test_server.quit()
+except Exception:
+try:
+test_server.close()
+except Exception:
+pass
 
-                        # =================================
-                        # ATTACH PDF
-                        # =================================
-                        if row["PDF_Found"]:
+=========================================================
+LOGIN STATUS
+=========================================================
+if st.session_state["login_verified"]:
+st.sidebar.success(
+f"✅ Verified: {st.session_state['verified_email']}"
+)
+else:
+st.sidebar.info(
+"Email send karne se pehle Test Outlook Login karein."
+)
 
-                            pdf_file = (
-                                pdf_dict[
-                                    target_pdf_name
-                                ]
-                            )
+=========================================================
+TABS
+=========================================================
+tab1, tab2 = st.tabs(
+[
+"📤 Send Bulk Emails",
+"📊 Delivery Report"
+]
+)
 
+=========================================================
+TAB 1
+=========================================================
+with tab1:
+col1, col2 = st.columns([1, 1])
+with col1:
+st.subheader("1. Patient List")
+uploaded_file = st.file_uploader(
+"Upload Patient CSV or Excel",
+type=["csv", "xlsx", "xls"]
+)
+st.caption(
+"Required columns: Name, Email, PatientID"
+)
+with col2:
+st.subheader("2. Diet Chart PDFs")
+uploaded_pdfs = st.file_uploader(
+"Upload All Patient PDFs",
+type=["pdf"],
+accept_multiple_files=True
+)
+st.caption(
+"Expected PDF: Diet_chart_PatientID.pdf"
+)
 
-                            pdf_file.seek(0)
-
-
-                            part = MIMEBase(
-                                "application",
-                                "octet-stream"
-                            )
-
-
-                            part.set_payload(
-                                pdf_file.read()
-                            )
-
-
-                            encoders.encode_base64(
-                                part
-                            )
-
-
-                            part.add_header(
-                                "Content-Disposition",
-                                (
-                                    "attachment; "
-                                    f'filename="{target_pdf_name}"'
-                                )
-                            )
-
-
-                            msg.attach(part)
-
-
-                            # =============================
-                            # SEND EMAIL
-                            # =============================
-                            try:
-
-                                server.sendmail(
-                                    sender_email,
-                                    patient_email,
-                                    msg.as_string()
-                                )
-
-
-                                timestamp = (
-                                    datetime.now()
-                                    .strftime(
-                                        "%Y-%m-%d %H:%M:%S"
-                                    )
-                                )
-
-
-                                df.at[
-                                    index,
-                                    "Status"
-                                ] = "Success"
-
-
-                                df.at[
-                                    index,
-                                    "Sent_At_Timestamp"
-                                ] = timestamp
-
-
-                            except Exception as err:
-
-                                df.at[
-                                    index,
-                                    "Status"
-                                ] = (
-                                    f"Failed: {err}"
-                                )
-
-
-                        else:
-
-                            df.at[
-                                index,
-                                "Status"
-                            ] = (
-                                "Failed: Mismatch - "
-                                f"PDF '{target_pdf_name}' Missing"
-                            )
-
-
-                        progress_bar.progress(
-                            (index + 1)
-                            / total_patients
-                        )
-
-
-                        time.sleep(0.05)
-
-
-                    server.quit()
-
-
-                    st.success(
-                        "🎉 Process complete! "
-                        "Delivery report generated "
-                        "with mismatch status."
-                    )
-
-
-                    st.session_state[
-                        "report_df"
-                    ] = df
-
-
-                except Exception as conn_err:
-
-                    st.error(
-                        f"SMTP Connection Error: "
-                        f"{conn_err}"
-                    )
-
-
+if uploaded_file is None:
+st.info(
+"Patient CSV/Excel upload karein."
+)
+elif not uploaded_pdfs:
+st.info(
+"Diet chart PDFs upload karein."
+)
+else:
+# =================================================
+# READ FILE
 # =========================================================
-# TAB 2
+extension = (
+uploaded_file.name
+.rsplit(".", 1)[-1]
+.lower()
+)
+try:
+if extension == "csv":
+df = pd.read_csv(
+uploaded_file,
+dtype=str
+)
+elif extension in ["xlsx", "xls"]:
+df = pd.read_excel(
+uploaded_file,
+dtype=str
+)
+else:
+st.error(
+"Unsupported file format."
+)
+st.stop()
+except Exception as error:
+st.error(
+f"File read error: {error}"
+)
+st.stop()
+
+# =================================================
+# COLUMN VALIDATION
 # =========================================================
+df.columns = (
+df.columns
+.astype(str)
+.str.strip()
+)
+required_columns = [
+"Name",
+"Email",
+"PatientID"
+]
+missing_columns = [
+column
+for column in required_columns
+if column not in df.columns
+]
+if missing_columns:
+st.error(
+"Required columns missing: "
+", ".join(missing_columns)
+)
+st.stop()
+
+# =================================================
+# CLEAN DATA
+# =========================================================
+df["Name"] = (
+df["Name"]
+.fillna("")
+.astype(str)
+.str.strip()
+)
+df["Email"] = (
+df["Email"]
+.fillna("")
+.astype(str)
+.str.strip()
+)
+df["PatientID"] = (
+df["PatientID"]
+.apply(clean_patient_id)
+)
+df = df[
+(df["Name"] != "")
+| (df["Email"] != "")
+| (df["PatientID"] != "")
+].copy()
+df.reset_index(
+drop=True,
+inplace=True
+)
+if df.empty:
+st.error(
+"Patient file mein valid records nahi hain."
+)
+st.stop()
+
+# =================================================
+# PDF LOOKUP
+# =========================================================
+pdf_dictionary = {
+pdf.name.strip().lower(): pdf
+for pdf in uploaded_pdfs
+}
+df["Expected_PDF"] = (
+df["PatientID"].apply(
+lambda patient_id:
+f"Diet_chart_{patient_id}.pdf"
+)
+)
+df["PDF_Found"] = (
+df["Expected_PDF"]
+.str.lower()
+.isin(pdf_dictionary.keys())
+)
+
+# =================================================
+# VALIDATION
+# =========================================================
+df["Email_Valid"] = (
+df["Email"].apply(is_valid_email)
+)
+df["Name_Valid"] = (
+df["Name"] != ""
+)
+df["PatientID_Valid"] = (
+df["PatientID"] != ""
+)
+df["Duplicate_PatientID"] = (
+df["PatientID"].duplicated(
+keep=False
+)
+& df["PatientID"].ne("")
+)
+df["Duplicate_Email"] = (
+df["Email"].duplicated(
+keep=False
+)
+& df["Email"].ne("")
+)
+df["Ready_To_Send"] = (
+df["PDF_Found"]
+& df["Email_Valid"]
+& df["Name_Valid"]
+& df["PatientID_Valid"]
+)
+
+# =================================================
+# COUNTS
+# =========================================================
+total_count = len(df)
+ready_count = int(
+df["Ready_To_Send"].sum()
+)
+missing_pdf_count = int(
+(~df["PDF_Found"]).sum()
+)
+invalid_email_count = int(
+(~df["Email_Valid"]).sum()
+)
+
+# =================================================
+# METRICS
+# =========================================================
+metric1, metric2, metric3, metric4 = (
+st.columns(4)
+)
+metric1.metric(
+"Total Records",
+total_count
+)
+metric2.metric(
+"Ready to Send",
+ready_count
+)
+metric3.metric(
+"Missing PDFs",
+missing_pdf_count
+)
+metric4.metric(
+"Invalid Emails",
+invalid_email_count
+)
+
+if missing_pdf_count > 0:
+st.warning(
+f"⚠️ {missing_pdf_count} patients ki "
+"matching PDF nahi mili."
+)
+
+if invalid_email_count > 0:
+st.warning(
+f"⚠️ {invalid_email_count} invalid "
+"email addresses hain."
+)
+
+if (
+missing_pdf_count == 0
+and invalid_email_count == 0
+):
+st.success(
+"✅ All patient records ready hain."
+)
+
+# =================================================
+# VALIDATION TABLE
+# =========================================================
+st.subheader("Pre-Send Validation")
+st.dataframe(
+df[
+[
+"Name",
+"Email",
+"PatientID",
+"Expected_PDF",
+"PDF_Found",
+"Email_Valid",
+"Duplicate_PatientID",
+"Duplicate_Email",
+"Ready_To_Send"
+]
+],
+use_container_width=True,
+hide_index=True
+)
+
+# =================================================
+# CONFIRM SEND
+# =========================================================
+confirmation = st.checkbox(
+f"I confirm that I want to send "
+f"{ready_count} patient emails."
+)
+
+if not st.session_state["login_verified"]:
+st.warning(
+"⚠️ Pehle sidebar mein Test Outlook Login karein."
+)
+
+send_disabled = (
+not confirmation
+or ready_count == 0
+or not st.session_state["login_verified"]
+)
+
+send_button = st.button(
+"🚀 Send Diet Charts",
+type="primary",
+use_container_width=True,
+disabled=send_disabled
+)
+
+# =================================================
+# SEND
+# =========================================================
+if send_button:
+if (
+sender_email
+!= st.session_state["verified_email"]
+):
+st.error(
+"Sender email change hua hai. "
+"Login dobara test karein."
+)
+st.stop()
+
+df["Status"] = "Pending"
+df["Sent_At_Timestamp"] = ""
+df["Error_Details"] = ""
+
+progress_bar = st.progress(0)
+status_text = st.empty()
+live_report = st.empty()
+server = None
+
+try:
+server = connect_outlook(
+sender_email,
+sender_password
+)
+
+total_patients = len(df)
+
+for position, (index, row) in enumerate(
+df.iterrows(),
+start=1
+):
+patient_name = row["Name"]
+patient_email = row["Email"]
+patient_id = row["PatientID"]
+pdf_name = row["Expected_PDF"]
+
+status_text.markdown(
+f"⏳ Processing "
+f"{position}/{total_patients}: "
+f"{patient_name} "
+f"(`{patient_id}`)"
+)
+
+if not row["Name_Valid"]:
+df.at[index, "Status"] = "Failed"
+df.at[
+index,
+"Error_Details"
+] = "Patient name blank"
+
+elif not row["PatientID_Valid"]:
+df.at[index, "Status"] = "Failed"
+df.at[
+index,
+"Error_Details"
+] = "Patient ID blank"
+
+elif not row["Email_Valid"]:
+df.at[index, "Status"] = "Failed"
+df.at[
+index,
+"Error_Details"
+] = "Invalid or blank email address"
+
+elif not row["PDF_Found"]:
+df.at[index, "Status"] = "Failed"
+df.at[
+index,
+"Error_Details"
+] = (
+f"PDF missing or mismatch: "
+f"{pdf_name}"
+)
+
+else:
+try:
+pdf_file = (
+pdf_dictionary[
+pdf_name.lower()
+]
+)
+pdf_file.seek(0)
+pdf_content = (
+pdf_file.read()
+)
+
+message = create_email(
+sender_email=sender_email,
+sender_name=sender_name,
+patient_name=patient_name,
+patient_email=patient_email,
+patient_id=patient_id,
+pdf_name=pdf_name,
+pdf_content=pdf_content
+)
+
+server.sendmail(
+sender_email,
+[patient_email],
+message.as_string()
+)
+
+timestamp = (
+datetime.now()
+.strftime(
+"%Y-%m-%d %H:%M:%S"
+)
+)
+
+df.at[
+index,
+"Status"
+] = "Success"
+
+df.at[
+index,
+"Sent_At_Timestamp"
+] = timestamp
+
+except Exception as send_error:
+df.at[
+index,
+"Status"
+] = "Failed"
+df.at[
+index,
+"Error_Details"
+] = str(send_error)
+
+progress_bar.progress(
+position / total_patients
+)
+
+live_report.dataframe(
+df[
+[
+"PatientID",
+"Name",
+"Email",
+"Status",
+"Sent_At_Timestamp",
+"Error_Details"
+]
+],
+use_container_width=True,
+hide_index=True
+)
+
+time.sleep(
+float(email_delay)
+)
+
+st.session_state["report_df"] = (
+df.copy()
+)
+
+success_count = int(
+(df["Status"] == "Success").sum()
+)
+failed_count = int(
+(df["Status"] == "Failed").sum()
+)
+
+status_text.success(
+"✅ Email dispatch completed."
+)
+
+result1, result2, result3 = (
+st.columns(3)
+)
+result1.metric(
+"Total",
+total_patients
+)
+result2.metric(
+"Success",
+success_count
+)
+result3.metric(
+"Failed",
+failed_count
+)
+
+except smtplib.SMTPAuthenticationError as error:
+st.session_state["login_verified"] = False
+st.error(
+"❌ Microsoft 365 authentication failed. "
+"Check whether SMTP AUTH has actually been "
+"enabled for the mailbox."
+)
+st.code(str(error))
+
+except Exception as error:
+st.error(
+"❌ Email sending process failed."
+)
+st.code(str(error))
+
+finally:
+if server is not None:
+try:
+server.quit()
+except Exception:
+try:
+server.close()
+except Exception:
+pass
+
+=========================================================
+TAB 2 - REPORT
+=========================================================
 with tab2:
+st.subheader(
+"📊 Delivery Report"
+)
 
-    st.subheader(
-        "📊 Delivery Report with Live "
-        "Timestamps & Mismatch Details"
-    )
+report_df = st.session_state.get(
+"report_df"
+)
 
+if report_df is None:
+st.info(
+"Abhi delivery report available nahi hai."
+)
 
-    if "report_df" in st.session_state:
+else:
+st.dataframe(
+report_df,
+use_container_width=True,
+hide_index=True
+)
 
-        report_df = (
-            st.session_state[
-                "report_df"
-            ]
-        )
+csv_data = (
+report_df
+.to_csv(index=False)
+.encode("utf-8-sig")
+)
 
-
-        st.dataframe(
-            report_df,
-            use_container_width=True
-        )
-
-
-        csv_data = (
-            report_df
-            .to_csv(index=False)
-            .encode("utf-8")
-        )
-
-
-        st.download_button(
-            label=(
-                "📥 Download Timestamp Report (CSV)"
-            ),
-            data=csv_data,
-            file_name=(
-                "diet_chart_delivery_report_"
-                f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                ".csv"
-            ),
-            mime="text/csv"
-        )
-
-    else:
-
-        st.info(
-            "No execution record found yet. "
-            "Please run the dispatch process in the "
-            "'Send Bulk Emails' tab."
-        )
+st.download_button(
+label="📥 Download Delivery Report",
+data=csv_data,
+file_name=(
+"diet_chart_delivery_report_"
+f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+),
+mime="text/csv",
+use_container_width=True
+)
