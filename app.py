@@ -34,15 +34,28 @@ with tab1:
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        st.subheader("1. Patient List (CSV)")
-        uploaded_csv = st.file_uploader("Upload Patient CSV File", type=["csv"])
+        st.subheader("1. Patient List (CSV / Excel)")
+        uploaded_file = st.file_uploader("Upload Patient File", type=["csv", "xlsx", "xls"])
         
     with col2:
         st.subheader("2. Diet Chart PDFs")
         uploaded_pdfs = st.file_uploader("Drag & Drop All Patient PDFs", type=["pdf"], accept_multiple_files=True)
 
-    if uploaded_csv and uploaded_pdfs:
-        df = pd.read_csv(uploaded_csv)
+    if uploaded_file and uploaded_pdfs:
+        # Read CSV or Excel dynamically based on file extension
+        file_extension = uploaded_file.name.split('.')[-1].lower()
+        try:
+            if file_extension == 'csv':
+                df = pd.read_csv(uploaded_file)
+            elif file_extension in ['xlsx', 'xls']:
+                df = pd.read_excel(uploaded_file)
+            else:
+                st.error("Unsupported file format!")
+                st.stop()
+        except Exception as read_err:
+            st.error(f"Error reading file: {read_err}")
+            st.stop()
+
         pdf_dict = {file.name.strip(): file for file in uploaded_pdfs}
 
         # --- PRE-CHECK MISMATCH VALIDATION BEFORE SENDING ---
