@@ -17,7 +17,7 @@ st.set_page_config(
     layout="wide"
 )
 
-GRAPH_URL = "https://graph.microsoft.com/v1.0"
+GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
 
 st.title("📋 Bulk Patient Diet Chart Mailer")
 
@@ -41,7 +41,7 @@ if "delivery_report" not in st.session_state:
 # =========================================================
 def clean_patient_id(value):
     """
-    Cleans PatientID values imported from CSV or Excel.
+    Clean Patient ID imported from CSV or Excel.
 
     Examples:
     P65088 remains P65088
@@ -61,7 +61,7 @@ def clean_patient_id(value):
 
 def is_valid_email(email_address):
     """
-    Performs basic email validation.
+    Basic email-format validation.
     """
 
     if not email_address:
@@ -72,14 +72,14 @@ def is_valid_email(email_address):
     if "@" not in parsed_email:
         return False
 
-    email_domain = parsed_email.split("@")[-1]
+    domain = parsed_email.split("@")[-1]
 
-    return "." in email_domain
+    return "." in domain
 
 
 def get_access_token():
     """
-    Retrieves Microsoft access token from Streamlit login.
+    Get the Microsoft access token from Streamlit login.
     """
 
     try:
@@ -88,13 +88,13 @@ def get_access_token():
         return None
 
 
-def get_logged_in_user(access_token):
+def get_signed_in_user(access_token):
     """
-    Gets connected Microsoft 365 account details.
+    Get details of the connected Microsoft 365 account.
     """
 
     response = requests.get(
-        f"{GRAPH_URL}/me",
+        f"{GRAPH_BASE_URL}/me",
         headers={
             "Authorization": f"Bearer {access_token}"
         },
@@ -106,7 +106,7 @@ def get_logged_in_user(access_token):
 
     if response.status_code != 200:
         raise Exception(
-            f"User verification failed. "
+            f"Microsoft account verification failed. "
             f"Status: {response.status_code}. "
             f"Details: {response.text}"
         )
@@ -134,7 +134,7 @@ def send_diet_chart_email(
     pdf_content
 ):
     """
-    Sends diet chart email through Microsoft Graph.
+    Send a PDF email using Microsoft Graph.
     """
 
     encoded_pdf = base64.b64encode(
@@ -185,7 +185,7 @@ Diet & Health Team
     }
 
     response = requests.post(
-        f"{GRAPH_URL}/me/sendMail",
+        f"{GRAPH_BASE_URL}/me/sendMail",
         headers={
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json"
@@ -205,7 +205,7 @@ Diet & Health Team
 
 
 # =========================================================
-# MICROSOFT LOGIN SCREEN
+# MICROSOFT LOGIN
 # =========================================================
 if not st.user.is_logged_in:
 
@@ -213,13 +213,13 @@ if not st.user.is_logged_in:
 
     st.info(
         "Microsoft account se secure sign-in karein. "
-        "Email ID, password aur OTP/Authenticator verification "
-        "Microsoft ki official screen par hogi."
+        "Email ID, password aur OTP ya Authenticator verification "
+        "Microsoft ki official login screen par hogi."
     )
 
     st.write(
-        "Login successful hone ke baad emails connected "
-        "Microsoft 365 mailbox se send hongi."
+        "Login successful hone ke baad diet chart emails "
+        "connected Microsoft 365 mailbox se send hongi."
     )
 
     st.button(
@@ -233,7 +233,7 @@ if not st.user.is_logged_in:
 
 
 # =========================================================
-# ACCESS TOKEN
+# GET ACCESS TOKEN
 # =========================================================
 access_token = get_access_token()
 
@@ -242,6 +242,10 @@ if not access_token:
     st.error(
         "Microsoft access token available nahi hai. "
         "Streamlit Secrets mein expose_tokens setting check karein."
+    )
+
+    st.code(
+        'expose_tokens = ["id", "access"]'
     )
 
     if st.button(
@@ -254,20 +258,20 @@ if not access_token:
 
 
 # =========================================================
-# VERIFY MICROSOFT ACCOUNT
+# VERIFY SIGNED-IN ACCOUNT
 # =========================================================
 try:
-    logged_in_user = get_logged_in_user(
+    signed_in_user = get_signed_in_user(
         access_token
     )
 
-except Exception as user_error:
+except Exception as verification_error:
 
     st.error(
-        "Microsoft account verify nahi ho saka."
+        "Signed-in Microsoft account verify nahi ho saka."
     )
 
-    st.code(str(user_error))
+    st.code(str(verification_error))
 
     if st.button(
         "Sign Out",
@@ -284,11 +288,11 @@ except Exception as user_error:
 st.sidebar.header("✅ Microsoft Account Connected")
 
 st.sidebar.write(
-    f"**Name:** {logged_in_user['name']}"
+    f"**Name:** {signed_in_user['name']}"
 )
 
 st.sidebar.write(
-    f"**Sender Email:** {logged_in_user['email']}"
+    f"**Sender Email:** {signed_in_user['email']}"
 )
 
 st.sidebar.success(
@@ -323,13 +327,13 @@ send_tab, report_tab = st.tabs(
 
 
 # =========================================================
-# SEND TAB
+# SEND EMAIL TAB
 # =========================================================
 with send_tab:
 
     st.success(
         f"Emails will be sent from: "
-        f"{logged_in_user['email']}"
+        f"{signed_in_user['email']}"
     )
 
     upload_column1, upload_column2 = st.columns(
@@ -422,7 +426,7 @@ with send_tab:
             st.stop()
 
         # =================================================
-        # VALIDATE COLUMN NAMES
+        # CLEAN COLUMN NAMES
         # =================================================
         df.columns = (
             df.columns
@@ -452,7 +456,7 @@ with send_tab:
             st.stop()
 
         # =================================================
-         # CLEAN PATIENT DATA
+        # CLEAN PATIENT DATA
         # =================================================
         df["Name"] = (
             df["Name"]
@@ -493,7 +497,7 @@ with send_tab:
             st.stop()
 
         # =================================================
-        # PREPARE PDF LOOKUP
+        # CREATE PDF DICTIONARY
         # =================================================
         pdf_dictionary = {
             uploaded_pdf.name.strip().lower(): uploaded_pdf
@@ -507,6 +511,9 @@ with send_tab:
             )
         )
 
+        # =================================================
+        # VALIDATION COLUMNS
+        # =================================================
         df["PDF_Found"] = (
             df["Expected_PDF"]
             .str.lower()
@@ -514,11 +521,10 @@ with send_tab:
         )
 
         df["Email_Valid"] = (
-            df["Email"]
-            .apply(is_valid_email)
+            df["Email"].apply(is_valid_email)
         )
 
-        df["Name_Valid] = (
+        df["Name_Valid"] = (
             df["Name"] != ""
         )
 
@@ -548,7 +554,7 @@ with send_tab:
         )
 
         # =================================================
-        # COUNTS
+        # VALIDATION COUNTS
         # =================================================
         total_records = len(df)
 
@@ -569,7 +575,7 @@ with send_tab:
         )
 
         # =================================================
-        # SUMMARY
+        # SUMMARY METRICS
         # =================================================
         metric1, metric2, metric3, metric4 = (
             st.columns(4)
@@ -595,6 +601,9 @@ with send_tab:
             invalid_email_count
         )
 
+        # =================================================
+        # VALIDATION MESSAGES
+        # =================================================
         if missing_pdf_count > 0:
 
             st.warning(
@@ -654,7 +663,7 @@ with send_tab:
         confirmation = st.checkbox(
             f"I confirm that I want to send "
             f"{ready_count} patient emails from "
-            f"{logged_in_user['email']}."
+            f"{signed_in_user['email']}."
         )
 
         send_button = st.button(
@@ -850,7 +859,7 @@ with send_tab:
                 )
 
             # =================================================
-            # FINAL REPORT
+            # FINAL RESULT
             # =================================================
             st.session_state["delivery_report"] = (
                 df.copy()
