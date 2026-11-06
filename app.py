@@ -1,13 +1,11 @@
+import base64
 import time
-import smtplib
-import pandas as pd
-import streamlit as st
-
 from datetime import datetime
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.application import MIMEApplication
-from email.utils import formataddr, parseaddr
+from email.utils import parseaddr
+
+import pandas as pd
+import requests
+import streamlit as st
 
 
 # =========================================================
@@ -18,6 +16,8 @@ st.set_page_config(
     page_icon="📋",
     layout="wide"
 )
+
+GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
 
 st.title("📋 Bulk Patient Diet Chart Mailer")
 
@@ -33,19 +33,11 @@ st.markdown("---")
 
 
 # =========================================================
-# FIXED MICROSOFT 365 SMTP SETTINGS
-# User does not need to enter host or port
-# =========================================================
-SMTP_SERVER = "smtp.office365.com"
-SMTP_PORT = 587
-
-
-# =========================================================
 # HELPER FUNCTIONS
 # =========================================================
 def clean_patient_id(value):
     """
-    Clean Patient ID imported from Excel or CSV.
+    Clean Patient ID imported from CSV or Excel.
 
     Examples:
     P65088 remains P65088
@@ -65,7 +57,7 @@ def clean_patient_id(value):
 
 def is_valid_email(email_address):
     """
-    Basic email-format validation.
+    Perform basic email validation.
     """
 
     if not email_address:
@@ -81,32 +73,60 @@ def is_valid_email(email_address):
     return "." in domain
 
 
-def connect_to_smtp(sender_email, sender_password):
+def get_access_token():
     """
-    Connect to Microsoft 365 SMTP using STARTTLS.
+    Get the Microsoft access token exposed by Streamlit OIDC.
     """
 
-    server = smtplib.SMTP(
-        SMTP_SERVER,
-        SMTP_PORT,
-        timeout=60
+    try:
+        return st.user.tokens["access"]
+    except Exception:
+        return None
+
+
+def get_signed_in_user(access_token):
+    """
+    Get signed-in Microsoft 365 account details.
+    """
+
+    response = requests.get(
+        f"{GRAPH_BASE_URL}/me",
+        headers={
+            "Authorization": f"Bearer {access_token}"
+        },
+        params={
+            "$select": (
+                "displayName,mail,userPrincipalName"
+            )
+        },
+        timeout=30
     )
 
-    server.ehlo()
-    server.starttls()
-    server.ehlo()
+    if response.status_code == 200:
+        user_data = response.json()
 
-    server.login(
-        sender_email.strip(),
-        sender_password
+        user_email = (
+            user_data.get("mail")
+            or user_data.get("userPrincipalName")
+            or ""
+        )
+
+        return {
+            "name": user_data.get(
+                "displayName",
+                ""
+            ),
+            "email": user_email
+        }
+
+    raise Exception(
+        f"Microsoft Graph user check failed: "
+        f"{response.status_code} - {response.text}"
     )
 
-    return server
 
-
-def create_email_message(
-    sender_email,
-    sender_name,
+def send_graph_email(
+    access_token,
     patient_name,
     patient_email,
     patient_id,
@@ -114,21 +134,12 @@ def create_email_message(
     pdf_content
 ):
     """
-    Create patient email with PDF attachment.
+    Send email using Microsoft Graph with a PDF attachment.
     """
 
-    message = MIMEMultipart()
-
-    message["From"] = formataddr(
-        (sender_name, sender_email)
-    )
-
-    message["To"] = patient_email
-
-    message["Subject"] = (
-        f"Your Personalized Diet Chart - "
-        f"Patient ID: {patient_id}"
-    )
+    encoded_pdf = base64.b64encode(
+        pdf_content
+    ).decode("utf-8")
 
     email_body = f"""Hello {patient_name},
 
@@ -142,63 +153,153 @@ Regards,
 Diet & Health Team
 """
 
-    message.attach(
-        MIMEText(
-            email_body,
-            "plain",
-            "utf-8"
-        )
+    request_body = {
+        "message": {
+            "subject": (
+                "Your Personalized Diet Chart - "
+                f"Patient ID: {patient_id}"
+            ),
+            "body": {
+                "contentType": "Text",
+                "content": email_body
+            },
+            "toRecipients": [
+                {
+                    "emailAddress": {
+                        "address": patient_email
+                    }
+                }
+            ],
+            "attachments": [
+                {
+                    "@odata.type": (
+                        "#microsoft.graph.fileAttachment"
+                    ),
+                    "name": pdf_name,
+                    "contentType": "application/pdf",
+                    "contentBytes": encoded_pdf
+                }
+            ]
+        },
+        "saveToSentItems": True
+    }
+
+    response = requests.post(
+        f"{GRAPH_BASE_URL}/me/sendMail",
+        headers={
+            "Authorization": (
+                f"Bearer {access_token}"
+            ),
+            "Content-Type": "application/json"
+        },
+        json=request_body,
+        timeout=120
     )
 
-    pdf_attachment = MIMEApplication(
-        pdf_content,
-        _subtype="pdf"
+    if response.status_code == 202:
+        return True, ""
+
+    return (
+        False,
+        f"Graph API Error {response.status_code}: "
+        f"{response.text}"
     )
-
-    pdf_attachment.add_header(
-        "Content-Disposition",
-        "attachment",
-        filename=pdf_name
-    )
-
-    message.attach(pdf_attachment)
-
-    return message
 
 
 # =========================================================
-# INITIALIZE SESSION STATE
+# SESSION STATE
 # =========================================================
-if "login_verified" not in st.session_state:
-    st.session_state["login_verified"] = False
-
-if "verified_email" not in st.session_state:
-    st.session_state["verified_email"] = ""
-
 if "report_df" not in st.session_state:
     st.session_state["report_df"] = None
 
 
 # =========================================================
-# SIDEBAR LOGIN
+# LOGIN SCREEN
 # =========================================================
-st.sidebar.header("🔐 Sender Login")
+if not st.user.is_logged_in:
 
-sender_name = st.sidebar.text_input(
-    "Sender Display Name",
-    value="Diet & Health Team"
+    st.subheader("🔐 Microsoft 365 Sign-In")
+
+    st.info(
+        "Microsoft account se secure login karein. "
+        "Email ID, password aur OTP Microsoft ki official "
+        "login screen par enter hoga."
+    )
+
+    st.write(
+        "Login successful hone ke baad isi Microsoft 365 "
+        "mailbox se diet chart emails send hongi."
+    )
+
+    st.button(
+        "🔐 Login with Microsoft",
+        type="primary",
+        use_container_width=True,
+        on_click=st.login
+    )
+
+    st.stop()
+
+
+# =========================================================
+# GET SIGNED-IN USER
+# =========================================================
+access_token = get_access_token()
+
+if not access_token:
+
+    st.error(
+        "Microsoft access token available nahi hai. "
+        "Streamlit Secrets mein expose_tokens = "
+        '["id", "access"] check karein.'
+    )
+
+    if st.button(
+        "Sign Out and Try Again",
+        use_container_width=True
+    ):
+        st.logout()
+
+    st.stop()
+
+
+try:
+    signed_in_user = get_signed_in_user(
+        access_token
+    )
+
+except Exception as user_error:
+
+    st.error(
+        "Signed-in Microsoft account verify nahi ho saka."
+    )
+
+    st.code(str(user_error))
+
+    if st.button(
+        "Sign Out",
+        use_container_width=True
+    ):
+        st.logout()
+
+    st.stop()
+
+
+# =========================================================
+# SIDEBAR ACCOUNT INFORMATION
+# =========================================================
+st.sidebar.header("✅ Microsoft Account Connected")
+
+st.sidebar.write(
+    f"**Name:** {signed_in_user['name']}"
 )
 
-sender_email = st.sidebar.text_input(
-    "Email ID",
-    placeholder="Enter Microsoft 365 email ID"
-).strip()
+st.sidebar.write(
+    f"**Sender Email:** {signed_in_user['email']}"
+)
 
-sender_password = st.sidebar.text_input(
-    "Password",
-    type="password",
-    placeholder="Enter email password",
-    help="Password is hidden and is not written inside the Python file."
+st.sidebar.success(
+    "Password aur OTP Microsoft ne securely verify kiya hai."
 )
 
 email_delay = st.sidebar.number_input(
@@ -210,110 +311,11 @@ email_delay = st.sidebar.number_input(
     help="Delay in seconds between two emails."
 )
 
-st.sidebar.caption(
-    "Microsoft 365 SMTP settings are already configured."
-)
-
-st.sidebar.code(
-    "Host: smtp.office365.com\n"
-    "Port: 587\n"
-    "Security: STARTTLS"
-)
-
-
-# =========================================================
-# TEST LOGIN BUTTON
-# =========================================================
 if st.sidebar.button(
-    "🔐 Test Email Login",
+    "🚪 Sign Out",
     use_container_width=True
 ):
-    st.session_state["login_verified"] = False
-    st.session_state["verified_email"] = ""
-
-    if not sender_email:
-        st.sidebar.error("Please enter the email ID.")
-
-    elif not is_valid_email(sender_email):
-        st.sidebar.error("Please enter a valid email ID.")
-
-    elif not sender_password:
-        st.sidebar.error("Please enter the password.")
-
-    else:
-        test_connection = None
-
-        try:
-            with st.sidebar:
-                with st.spinner("Checking email login..."):
-                    test_connection = connect_to_smtp(
-                        sender_email=sender_email,
-                        sender_password=sender_password
-                    )
-
-            st.session_state["login_verified"] = True
-            st.session_state["verified_email"] = sender_email
-
-            st.sidebar.success(
-                "✅ Email login successful."
-            )
-
-        except smtplib.SMTPAuthenticationError as auth_error:
-            st.sidebar.error(
-                "❌ Login failed. Email/password incorrect ho sakta "
-                "hai ya mailbox par SMTP AUTH disabled ho sakta hai."
-            )
-
-            st.sidebar.code(str(auth_error))
-
-        except smtplib.SMTPConnectError as connection_error:
-            st.sidebar.error(
-                "❌ Microsoft 365 SMTP server se connection nahi hua."
-            )
-
-            st.sidebar.code(str(connection_error))
-
-        except TimeoutError:
-            st.sidebar.error(
-                "❌ Connection timed out. Internet ya firewall "
-                "settings check karein."
-            )
-
-        except Exception as login_error:
-            st.sidebar.error(
-                "❌ Email login test failed."
-            )
-
-            st.sidebar.code(str(login_error))
-
-        finally:
-            if test_connection is not None:
-                try:
-                    test_connection.quit()
-                except Exception:
-                    try:
-                        test_connection.close()
-                    except Exception:
-                        pass
-
-
-# Reset login verification if email ID changes
-if (
-    st.session_state["verified_email"]
-    and sender_email != st.session_state["verified_email"]
-):
-    st.session_state["login_verified"] = False
-
-
-# Login status
-if st.session_state["login_verified"]:
-    st.sidebar.success(
-        f"✅ Verified: {st.session_state['verified_email']}"
-    )
-else:
-    st.sidebar.info(
-        "Email send karne se pehle Test Email Login karein."
-    )
+    st.logout()
 
 
 # =========================================================
@@ -332,9 +334,17 @@ send_tab, report_tab = st.tabs(
 # =========================================================
 with send_tab:
 
-    upload_col1, upload_col2 = st.columns([1, 1])
+    st.success(
+        "Emails will be sent from: "
+        f"{signed_in_user['email']}"
+    )
+
+    upload_col1, upload_col2 = st.columns(
+        [1, 1]
+    )
 
     with upload_col1:
+
         st.subheader("1. Patient List")
 
         uploaded_patient_file = st.file_uploader(
@@ -348,6 +358,7 @@ with send_tab:
         )
 
     with upload_col2:
+
         st.subheader("2. Diet Chart PDFs")
 
         uploaded_pdfs = st.file_uploader(
@@ -362,16 +373,19 @@ with send_tab:
         )
 
     if uploaded_patient_file is None:
+
         st.info(
-            "Patient CSV or Excel file upload karein."
+            "Patient CSV ya Excel file upload karein."
         )
 
     elif not uploaded_pdfs:
+
         st.info(
             "Patient diet chart PDFs upload karein."
         )
 
     else:
+
         # =================================================
         # READ PATIENT FILE
         # =================================================
@@ -382,28 +396,39 @@ with send_tab:
         )
 
         try:
+
             if file_extension == "csv":
+
                 df = pd.read_csv(
                     uploaded_patient_file,
                     dtype=str
                 )
 
-            elif file_extension in ["xlsx", "xls"]:
+            elif file_extension in [
+                "xlsx",
+                "xls"
+            ]:
+
                 df = pd.read_excel(
                     uploaded_patient_file,
                     dtype=str
                 )
 
             else:
+
                 st.error(
                     "Unsupported patient file format."
                 )
+
                 st.stop()
 
         except Exception as read_error:
+
             st.error(
-                f"Patient file read nahi ho paayi: {read_error}"
+                f"Patient file read nahi hui: "
+                f"{read_error}"
             )
+
             st.stop()
 
         # =================================================
@@ -428,10 +453,12 @@ with send_tab:
         ]
 
         if missing_columns:
+
             st.error(
                 "Required columns missing hain: "
                 + ", ".join(missing_columns)
             )
+
             st.stop()
 
         # =================================================
@@ -440,7 +467,7 @@ with send_tab:
         df["Name"] = (
             df["Name"]
             .fillna("")
-            .astype(str)
+            .astypee(str)
             .str.strip()
         )
 
@@ -453,10 +480,9 @@ with send_tab:
 
         df["PatientID"] = (
             df["PatientID"]
-            .apply(clean_patient_id)
+            apply(clean_patient_id)
         )
 
-        # Remove completely blank records
         df = df[
             (df["Name"] != "")
             | (df["Email"] != "")
@@ -469,22 +495,24 @@ with send_tab:
         )
 
         if df.empty:
+
             st.error(
-                "Patient file mein koi valid record nahi mila."
+                "Patient file mein valid records nahi mile."
             )
+
             st.stop()
 
         # =================================================
-        # PREPARE PDF DICTIONARY
+        # PDF MATCHING
         # =================================================
         pdf_dictionary = {
-            uploaded_pdf.name.strip().lower(): uploaded_pdf
+            uploaded_pdf.name.strip().lower():
+            uploaded_pdf
             for uploaded_pdf in uploaded_pdfs
         }
 
         df["Expected_PDF"] = (
-            df["PatientID"]
-            .apply(
+            df["PatientID"].apply(
                 lambda patient_id:
                 f"Diet_chart_{patient_id}.pdf"
             )
@@ -501,12 +529,12 @@ with send_tab:
             .apply(is_valid_email)
         )
 
-        df["PatientID_Valid"] = (
-            df["PatientID"] != ""
-        )
-
         df["Name_Valid"] = (
             df["Name"] != ""
+        )
+
+        df["PatientID_Valid"] = (
+            df["PatientID"] != ""
         )
 
         df["Duplicate_PatientID"] = (
@@ -526,8 +554,8 @@ with send_tab:
         df["Ready_To_Send"] = (
             df["PDF_Found"]
             & df["Email_Valid"]
-            & df["PatientID_Valid"]
             & df["Name_Valid"]
+            & df["PatientID_Valid"]
         )
 
         # =================================================
@@ -547,11 +575,13 @@ with send_tab:
             (~df["Email_Valid"]).sum()
         )
 
-        duplicate_id_count = int(
+        duplicate_patient_count = int(
             df["Duplicate_PatientID"].sum()
         )
 
-        metric1, metric2, metric3, metric4 = st.columns(4)
+        metric1, metric2, metric3, metric4 = (
+            st.columns(4)
+        )
 
         metric1.metric(
             "Total Records",
@@ -577,33 +607,37 @@ with send_tab:
         # WARNINGS
         # =================================================
         if missing_pdf_count > 0:
+
             st.warning(
-                f"⚠️ {missing_pdf_count} records ki matching "
-                "PDF nahi mili."
+                f"⚠️ {missing_pdf_count} records ki "
+                "matching PDF nahi mili."
             )
 
         if invalid_email_count > 0:
+
             st.warning(
-                f"⚠️ {invalid_email_count} records mein email "
-                "invalid ya blank hai."
+                f"⚠️ {invalid_email_count} records mein "
+                "email invalid ya blank hai."
             )
 
-        if duplicate_id_count > 0:
+        if duplicate_patient_count > 0:
+
             st.warning(
                 "⚠️ Duplicate Patient IDs present hain. "
-                "Duplicates ko send karne se pehle check karein."
+                "Send karne se pehle verify karein."
             )
 
         if (
             missing_pdf_count == 0
             and invalid_email_count == 0
         ):
+
             st.success(
                 "✅ All records passed the main validation."
             )
 
         # =================================================
-        # DISPLAY VALIDATION TABLE
+        # VALIDATION TABLE
         # =================================================
         st.subheader("Pre-Send Validation")
 
@@ -615,6 +649,7 @@ with send_tab:
             "PDF_Found",
             "Email_Valid",
             "Duplicate_PatientID",
+            "Duplicate_Email",
             "Ready_To_Send"
         ]
 
@@ -625,164 +660,144 @@ with send_tab:
         )
 
         # =================================================
-        # SEND CONFIRMATION
+        # CONFIRMATION
         # =================================================
         confirmation = st.checkbox(
             f"I confirm that I want to send "
-            f"{ready_count} patient emails."
+            f"{ready_count} patient emails from "
+            f"{signed_in_user['email']}."
         )
-
-        send_disabled = (
-            not confirmation
-            or ready_count == 0
-            or not st.session_state["login_verified"]
-        )
-
-        if not st.session_state["login_verified"]:
-            st.warning(
-                "⚠️ Sidebar mein email ID aur password enter "
-                "karke pehle 'Test Email Login' karein."
-            )
 
         send_button = st.button(
             "🚀 Send Diet Charts",
             type="primary",
             use_container_width=True,
-            disabled=send_disabled
+            disabled=(
+                not confirmation
+                or ready_count == 0
+            )
         )
 
         # =================================================
-        # EMAIL SENDING PROCESS
+        # SEND EMAILS
         # =================================================
         if send_button:
-
-            if (
-                sender_email
-                != st.session_state["verified_email"]
-            ):
-                st.error(
-                    "Sender email change hua hai. "
-                    "Please login test dobara karein."
-                )
-                st.stop()
 
             df["Status"] = "Pending"
             df["Sent_At_Timestamp"] = ""
             df["Error_Details"] = ""
 
             progress_bar = st.progress(0)
+
             status_placeholder = st.empty()
+
             live_report_placeholder = st.empty()
 
-            smtp_connection = None
+            total_patients = len(df)
 
-            try:
-                status_placeholder.info(
-                    "Microsoft 365 SMTP se connect ho raha hai..."
+            token_expired = False
+
+            for position, (index, row) in enumerate(
+                df.iterrows(),
+                start=1
+            ):
+
+                patient_name = row["Name"]
+                patient_email = row["Email"]
+                patient_id = row["PatientID"]
+                pdf_name = row["Expected_PDF"]
+
+                processing_time = (
+                    datetime.now()
+                    .strftime("%Y-%m-%d %H:%M:%S")
                 )
 
-                smtp_connection = connect_to_smtp(
-                    sender_email=sender_email,
-                    sender_password=sender_password
+                status_placeholder.markdown(
+                    f"⏳ **[{processing_time}]** "
+                    f"Processing {position}/{total_patients}: "
+                    f"**{patient_name}** (`{patient_id}`)"
                 )
 
-                total_patients = len(df)
+                # -----------------------------------------
+                # VALIDATION FAILURES
+                # -----------------------------------------
+                if not row["Name_Valid"]:
 
-                for position, (index, row) in enumerate(
-                    df.iterrows(),
-                    start=1
-                ):
-                    patient_name = row["Name"]
-                    patient_email = row["Email"]
-                    patient_id = row["PatientID"]
-                    expected_pdf = row["Expected_PDF"]
+                    df.at[
+                        index,
+                        "Status"
+                    ] = "Failed"
 
-                    processing_time = (
-                        datetime.now()
-                        .strftime("%Y-%m-%d %H:%M:%S")
+                    df.at[
+                        index,
+                        "Error_Details"
+                    ] = "Patient name is blank"
+
+                elif not row["PatientID_Valid"]:
+
+                    df.at[
+                        index,
+                        "Status"
+                    ] = "Failed"
+
+                    df.at[
+                        index,
+                        "Error_Details"
+                    ] = "Patient ID is blank"
+
+                elif not row["Email_Valid"]:
+
+                    df.at[
+                        index,
+                        "Status"
+                    ] = "Failed"
+
+                    df.at[
+                        index,
+                        "Error_Details"
+                    ] = (
+                        "Invalid or blank email address"
                     )
 
-                    status_placeholder.markdown(
-                        f"⏳ **[{processing_time}]** "
-                        f"Processing {position}/{total_patients}: "
-                        f"**{patient_name}** (`{patient_id}`)"
+                elif not row["PDF_Found"]:
+
+                    df.at[
+                        index,
+                        "Status"
+                    ] = "Failed"
+
+                    df.at[
+                        index,
+                        "Error_Details"
+                    ] = (
+                        f"PDF missing or mismatch: "
+                        f"{pdf_name}"
                     )
 
-                    # -------------------------------------
-                    # INVALID NAME
-                    # -------------------------------------
-                    if not row["Name_Valid"]:
-                        df.at[index, "Status"] = "Failed"
-                        df.at[
-                            index,
-                            "Error_Details"
-                        ] = "Patient name is blank"
+                else:
 
-                    # -------------------------------------
-                    # INVALID PATIENT ID
-                    # -------------------------------------
-                    elif not row["PatientID_Valid"]:
-                        df.at[index, "Status"] = "Failed"
-                        df.at[
-                            index,
-                            "Error_Details"
-                        ] = "Patient ID is blank"
+                    try:
 
-                    # -------------------------------------
-                    # INVALID EMAIL
-                    # -------------------------------------
-                    elif not row["Email_Valid"]:
-                        df.at[index, "Status"] = "Failed"
-                        df.at[
-                            index,
-                            "Error_Details"
-                        ] = "Invalid or blank email address"
+                        pdf_file = pdf_dictionary[
+                            pdf_name.lower()
+                        ]
 
-                    # -------------------------------------
-                    # MISSING PDF
-                    # -------------------------------------
-                    elif not row["PDF_Found"]:
-                        df.at[index, "Status"] = "Failed"
-                        df.at[
-                            index,
-                            "Error_Details"
-                        ] = (
-                            "PDF mismatch or missing: "
-                            f"{expected_pdf}"
-                        )
+                        pdf_file.seek(0)
 
-                    # -------------------------------------
-                    # SEND EMAIL
-                    # -------------------------------------
-                    else:
-                        try:
-                            pdf_file = pdf_dictionary[
-                                expected_pdf.lower()
-                            ]
+                        pdf_content = pdf_file.read()
 
-                            pdf_file.seek(0)
-                            pdf_content = pdf_file.read()
-
-                            email_message = create_email_message(
-                                sender_email=sender_email,
-                                sender_name=sender_name,
+                        success, error_details = (
+                            send_graph_email(
+                                access_token=access_token,
                                 patient_name=patient_name,
                                 patient_email=patient_email,
                                 patient_id=patient_id,
-                                pdf_name=expected_pdf,
+                                pdf_name=pdf_name,
                                 pdf_content=pdf_content
                             )
+                        )
 
-                            smtp_connection.sendmail(
-                                sender_email,
-                                [patient_email],
-                                email_message.as_string()
-                            )
-
-                            sent_time = (
-                                datetime.now()
-                                .strftime("%Y-%m-%d %H:%M:%S")
-                            )
+                        if success:
 
                             df.at[
                                 index,
@@ -792,58 +807,15 @@ with send_tab:
                             df.at[
                                 index,
                                 "Sent_At_Timestamp"
-                            ] = sent_time
-
-                            df.at[
-                                index,
-                                "Error_Details"
-                            ] = ""
-
-                        except smtplib.SMTPServerDisconnected:
-                            try:
-                                smtp_connection = connect_to_smtp(
-                                    sender_email=sender_email,
-                                    sender_password=sender_password
+                            ] = (
+                                datetime.now()
+                                .strftime(
+                                    "%Y-%m-%d %H:%M:%S"
                                 )
+                            )
 
-                                smtp_connection.sendmail(
-                                    sender_email,
-                                    [patient_email],
-                                    email_message.as_string()
-                                )
+                        else:
 
-                                sent_time = (
-                                    datetime.now()
-                                    .strftime(
-                                        "%Y-%m-%d %H:%M:%S"
-                                    )
-                                )
-
-                                df.at[
-                                    index,
-                                    "Status"
-                                ] = "Success"
-
-                                df.at[
-                                    index,
-                                    "Sent_At_Timestamp"
-                                ] = sent_time
-
-                            except Exception as reconnect_error:
-                                df.at[
-                                    index,
-                                    "Status"
-                                ] = "Failed"
-
-                                df.at[
-                                    index,
-                                    "Error_Details"
-                                ] = (
-                                    "SMTP reconnect failed: "
-                                    f"{reconnect_error}"
-                                )
-
-                        except Exception as send_error:
                             df.at[
                                 index,
                                 "Status"
@@ -852,121 +824,108 @@ with send_tab:
                             df.at[
                                 index,
                                 "Error_Details"
-                            ] = str(send_error)
+                            ] = error_details
 
-                    progress_bar.progress(
-                        position / total_patients
-                    )
+                            if (
+                                "InvalidAuthenticationToken"
+                                in error_details
+                                or "401" in error_details
+                            ):
 
-                    live_report_placeholder.dataframe(
-                        df[
-                            [
-                                "PatientID",
-                                "Name",
-                                "Email",
-                                "Status",
-                                "Sent_At_Timestamp",
-                                "Error_Details"
-                            ]
-                        ],
-                        use_container_width=True,
-                        hide_index=True
-                    )
+                                token_expired = True
 
-                    time.sleep(
-                        float(email_delay)
-                    )
+                    except Exception as send_error:
 
-                # =========================================
-                # FINAL SUMMARY
-                # =========================================
-                success_count = int(
-                    (df["Status"] == "Success").sum()
+                        df.at[
+                            index,
+                            "Status"
+                        ] = "Failed"
+
+                        df.at[
+                            index,
+                            "Error_Details"
+                        ] = str(send_error)
+
+                progress_bar.progress(
+                    position / total_patients
                 )
 
-                failed_count = int(
-                    (df["Status"] == "Failed").sum()
+                live_report_placeholder.dataframe(
+                    df[
+                        [
+                            "PatientID",
+                            "Name",
+                            "Email",
+                            "Status",
+                            "Sent_At_Timestamp",
+                            "Error_Details"
+                        ]
+                    ],
+                    use_container_width=True,
+                    hide_index=True
                 )
 
-                pending_count = int(
-                    (df["Status"] == "Pending").sum()
+                if token_expired:
+
+                    status_placeholder.error(
+                        "Microsoft login token expired. "
+                        "Please sign out and sign in again."
+                    )
+
+                    break
+
+                time.sleep(
+                    float(email_delay)
                 )
 
-                st.session_state["report_df"] = df.copy()
+            # =================================================
+            # FINAL REPORT
+            # =================================================
+            st.session_state["report_df"] = (
+                df.copy()
+            )
+
+            success_count = int(
+                (df["Status"] == "Success").sum()
+            )
+
+            failed_count = int(
+                (df["Status"] == "Failed").sum()
+            )
+
+            pending_count = int(
+                (df["Status"] == "Pending").sum()
+            )
+
+            if not token_expired:
 
                 status_placeholder.success(
                     "✅ Email dispatch completed."
                 )
 
-                result1, result2, result3, result4 = (
-                    st.columns(4)
-                )
+            result1, result2, result3, result4 = (
+                st.columns(4)
+            )
 
-                result1.metric(
-                    "Total",
-                    total_patients
-                )
+            result1.metric(
+                "Total",
+                total_patients
+            )
 
-                result2.metric(
-                    "Success",
-                    success_count
-                )
+            result2.metric(
+                "Success",
+                success_count
+            )
 
-                result3.metric(
-                    "Failed",
-                    failed_count
-                )
+            result3.metric(
+                "Failed",
+                failed_count
+            )
 
-                result4.metric(
-                    "Pending",
-                    pending_count
-                )
-
-                if failed_count == 0:
-                    st.success(
-                        "🎉 All valid diet chart emails "
-                        "successfully sent."
-                    )
-                else:
-                    st.warning(
-                        f"Process completed. {failed_count} "
-                        "records failed or were skipped."
-                    )
-
-            except smtplib.SMTPAuthenticationError as auth_error:
-                st.session_state["login_verified"] = False
-
-                st.error(
-                    "❌ Authentication failed. Email/password "
-                    "incorrect ho sakta hai ya SMTP AUTH disabled hai."
-                )
-
-                st.code(str(auth_error))
-
-            except smtplib.SMTPConnectError as connection_error:
-                st.error(
-                    "❌ Microsoft 365 SMTP server se "
-                    "connection nahi hua."
-                )
-
-                st.code(str(connection_error))
-
-            except Exception as process_error:
-                st.error(
-                    "❌ Email dispatch process mein error aaya."
-                )
-
-                st.code(str(process_error))
-
-            finally:
-                if smtp_connection is not None:
-                    try:
-                        smtp_connection.quit()
-                    except Exception:
-                        try:
-                            smtp_connection.close()
-                        except Exception:
-                            pass
+            result4.metric(
+                "Pending",
+                pending_count
+            )
 
 
 # =========================================================
@@ -974,13 +933,19 @@ with send_tab:
 # =========================================================
 with report_tab:
 
-    st.subheader(
-        "📊 Delivery Report"
+    st.subheader("📊 Delivery Report")
+
+    report_df = st.session_state.get(
+        "report_df"
     )
 
-    report_df = st.session_state.get("report_df")
+    if report_df is None:
 
-    if report_df is not None:
+        st.info(
+            "Abhi koi delivery report available nahi hai."
+        )
+
+    else:
 
         success_count = int(
             (report_df["Status"] == "Success").sum()
@@ -994,26 +959,26 @@ with report_tab:
             (report_df["Status"] == "Pending").sum()
         )
 
-        report_metric1, report_metric2, report_metric3, report_metric4 = (
+        report1, report2, report3, report4 = (
             st.columns(4)
         )
 
-        report_metric1.metric(
-            "Total Records",
+        report1.metric(
+            "Total",
             len(report_df)
         )
 
-        report_metric2.metric(
+        report2.metric(
             "Success",
             success_count
         )
 
-        report_metric3.metric(
+        report3.metric(
             "Failed",
             failed_count
         )
 
-        report_metric4.metric(
+        report4.metric(
             "Pending",
             pending_count
         )
@@ -1079,7 +1044,7 @@ with report_tab:
             )
 
             st.download_button(
-                label="⚠️ Download Failed Records Only",
+                label="⚠️ Download Failed Records",
                 data=failed_csv,
                 file_name=(
                     "failed_diet_chart_emails_"
@@ -1088,9 +1053,3 @@ with report_tab:
                 mime="text/csv",
                 use_container_width=True
             )
-
-    else:
-        st.info(
-            "Abhi koi delivery report available nahi hai. "
-            "Pehle Send Bulk Emails tab se process run karein."
-        )
