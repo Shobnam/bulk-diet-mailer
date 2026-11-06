@@ -1,4 +1,5 @@
-streamlit
+streamlit[auth]>=1.66.0
 pandas
+requests
 openpyxl
 xlrd
