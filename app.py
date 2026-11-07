@@ -16,7 +16,7 @@ st.set_page_config(
     page_icon="📋",
     layout="wide"
 )
-st.title("📋 Bulk Patient Diet Chart Mailer")
+st.title("📋 Bulk Patient Diet Chart Mailer via SendGrid")
 st.markdown(
     f"⏱️ System Current Time: "
     f"`{datetime.now().strftime('%d-%b-%Y | %I:%M:%S %p')}`"
@@ -24,9 +24,9 @@ st.markdown(
 st.markdown("---")
 
 # =========================================================
-# MICROSOFT 365 SMTP SETTINGS
+# SENDGRID SMTP SETTINGS
 # =========================================================
-SMTP_SERVER = "smtp.office365.com"
+SMTP_SERVER = "smtp.sendgrid.net"
 SMTP_PORT = 587
 
 # =========================================================
@@ -59,7 +59,7 @@ def is_valid_email(email_address):
     domain = parsed_email.split("@")[-1]
     return "." in domain
 
-def connect_outlook(sender_email, sender_password):
+def connect_sendgrid(api_key):
     server = smtplib.SMTP(
         SMTP_SERVER,
         SMTP_PORT,
@@ -68,10 +68,8 @@ def connect_outlook(sender_email, sender_password):
     server.ehlo()
     server.starttls()
     server.ehlo()
-    server.login(
-        sender_email.strip(),
-        sender_password
-    )
+    # SendGrid requires username to literally be "apikey"
+    server.login("apikey", api_key.strip())
     return server
 
 def create_email(
@@ -125,19 +123,20 @@ Diet & Health Team
 # =========================================================
 # SIDEBAR LOGIN
 # =========================================================
-st.sidebar.header("🔐 Microsoft 365 Sender Login")
+st.sidebar.header("🔐 SendGrid Credentials")
 sender_name = st.sidebar.text_input(
     "Sender Display Name",
     value="Diet & Health Team"
 )
 sender_email = st.sidebar.text_input(
-    "Work Email ID",
+    "Work Email ID (Verified Sender)",
+    value="shobnambegum@lupindigitalhealth.com",
     placeholder="yourname@company.com"
 ).strip()
-sender_password = st.sidebar.text_input(
-    "Password",
+sendgrid_api_key = st.sidebar.text_input(
+    "SendGrid API Key",
     type="password",
-    placeholder="Enter work email password"
+    placeholder="SG.xxxxxxxxxxxxxxxxxxxx"
 )
 email_delay = st.sidebar.number_input(
     "Delay Between Emails (seconds)",
@@ -147,7 +146,7 @@ email_delay = st.sidebar.number_input(
     step=0.5
 )
 st.sidebar.caption(
-    "Microsoft 365 SMTP: smtp.office365.com | Port 587 | STARTTLS"
+    "SendGrid SMTP: smtp.sendgrid.net | Port 587"
 )
 
 # =========================================================
@@ -161,10 +160,10 @@ if (
     st.session_state["verified_email"] = ""
 
 # =========================================================
-# TEST LOGIN
+# TEST CONNECTION
 # =========================================================
 if st.sidebar.button(
-    "🔐 Test Outlook Login",
+    "🔐 Test SendGrid Connection",
     use_container_width=True
 ):
     st.session_state["login_verified"] = False
@@ -177,36 +176,28 @@ if st.sidebar.button(
         st.sidebar.error(
             "Valid Email ID enter karein."
         )
-    elif not sender_password:
+    elif not sendgrid_api_key:
         st.sidebar.error(
-            "Password enter karein."
+            "SendGrid API Key enter karein."
         )
     else:
         test_server = None
         try:
             with st.sidebar:
                 with st.spinner(
-                    "Microsoft 365 login check ho raha hai..."
+                    "SendGrid connection check ho raha hai..."
                 ):
-                    test_server = connect_outlook(
-                        sender_email,
-                        sender_password
+                    test_server = connect_sendgrid(
+                        sendgrid_api_key
                     )
             st.session_state["login_verified"] = True
             st.session_state["verified_email"] = sender_email
             st.sidebar.success(
-                "✅ Outlook login successful."
+                "✅ SendGrid connection successful."
             )
-        except smtplib.SMTPAuthenticationError as error:
-            st.sidebar.error(
-                "❌ Authentication failed. "
-                "Email/password check karein ya confirm karein "
-                "ki Authenticated SMTP enable ho chuka hai."
-            )
-            st.sidebar.code(str(error))
         except Exception as error:
             st.sidebar.error(
-                "❌ Microsoft 365 connection failed."
+                "❌ SendGrid connection failed."
             )
             st.sidebar.code(str(error))
         finally:
@@ -224,11 +215,11 @@ if st.sidebar.button(
 # =========================================================
 if st.session_state["login_verified"]:
     st.sidebar.success(
-        f"✅ Verified: {st.session_state['verified_email']}"
+        f"✅ Verified Sender: {st.session_state['verified_email']}"
     )
 else:
     st.sidebar.info(
-        "Email send karne se pehle Test Outlook Login karein."
+        "Email send karne se pehle Test SendGrid Connection karein."
     )
 
 # =========================================================
@@ -503,7 +494,7 @@ with tab1:
 
         if not st.session_state["login_verified"]:
             st.warning(
-                "⚠️ Pehle sidebar mein Test Outlook Login karein."
+                "⚠️ Pehle sidebar mein Test SendGrid Connection karein."
             )
 
         send_disabled = (
@@ -529,7 +520,7 @@ with tab1:
             ):
                 st.error(
                     "Sender email change hua hai. "
-                    "Login dobara test karein."
+                    "Connection dobara test karein."
                 )
                 st.stop()
 
@@ -543,9 +534,8 @@ with tab1:
             server = None
 
             try:
-                server = connect_outlook(
-                    sender_email,
-                    sender_password
+                server = connect_sendgrid(
+                    sendgrid_api_key
                 )
 
                 total_patients = len(df)
@@ -705,15 +695,6 @@ with tab1:
                     "Failed",
                     failed_count
                 )
-
-            except smtplib.SMTPAuthenticationError as error:
-                st.session_state["login_verified"] = False
-                st.error(
-                    "❌ Microsoft 365 authentication failed. "
-                    "Check whether SMTP AUTH has actually been "
-                    "enabled for the mailbox."
-                )
-                st.code(str(error))
 
             except Exception as error:
                 st.error(
