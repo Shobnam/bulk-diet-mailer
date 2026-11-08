@@ -71,6 +71,21 @@ def connect_sendgrid(api_key):
     server.login("apikey", api_key.strip())
     return server
 
+def find_pdf_file(patient_id, pdf_dictionary):
+    """
+    Uploaded PDFs mein se us file ko dhoondta hai jiske naam mein Patient ID maujud ho 
+    (jaise DietplanP67861NainikaVerma04112026_120054.pdf mein P67861).
+    """
+    if not patient_id:
+        return None, False
+    
+    clean_pid = patient_id.lower()
+    for filename, pdf_obj in pdf_dictionary.items():
+        if clean_pid in filename.lower():
+            return filename, True
+            
+    return None, False
+
 def create_email(
     sender_email,
     sender_name,
@@ -85,22 +100,23 @@ def create_email(
         (sender_name, sender_email)
     )
     message["To"] = patient_email
-    # BCC mein work email daalne se copy inbox mein aayegi aur Outlook Rule se folder mein move ho jayegi
     message["Bcc"] = sender_email
     message["Subject"] = (
         f"Your Personalized Diet Chart - "
         f"Patient ID: {patient_id}"
     )
-    body = f"""Hello {patient_name},
+    body = f"""Dear {patient_name},
 
-Your personalized diet chart for Patient ID {patient_id} is attached to this email.
+Greetings from Niva Bupa!
 
-Please review the attached PDF document for your detailed nutrition guidelines.
+Thank you for attending your consultation with health coach. Please find your personalized diet plan attached for your reference.
 
-If you have any questions regarding your diet chart, please contact your assigned health coach.
+We encourage you to follow the recommendations discussed during your consultation to help you achieve your health goals.
+
+We wish you good health and look forward to supporting you on your wellness journey.
 
 Regards,
-Diet & Health Team
+Niva Bupa Post Discharge Care Team
 """
     message.attach(
         MIMEText(
@@ -127,7 +143,7 @@ Diet & Health Team
 st.sidebar.header("🔐 SendGrid Credentials")
 sender_name = st.sidebar.text_input(
     "Sender Display Name",
-    value="Diet & Health Team"
+    value="Niva Bupa Post Discharge Care Team"
 )
 sender_email = st.sidebar.text_input(
     "Work Email ID (Verified Sender)",
@@ -222,11 +238,11 @@ with tab1:
     with col2:
         st.subheader("2. Diet Chart PDFs")
         uploaded_pdfs = st.file_uploader(
-            "Upload All Patient PDFs",
+            "Upload All Patient PDFs (e.g., DietplanP67861...)",
             type=["pdf"],
             accept_multiple_files=True
         )
-        st.caption("Expected PDF: Diet_chart_PatientID.pdf")
+        st.caption("PDF filenames can include Patient ID, name, date, and timestamps.")
 
     if uploaded_file is None:
         st.info("Patient CSV/Excel upload karein.")
@@ -263,8 +279,16 @@ with tab1:
             st.stop()
 
         pdf_dictionary = {pdf.name.strip().lower(): pdf for pdf in uploaded_pdfs}
-        df["Expected_PDF"] = df["PatientID"].apply(lambda pid: f"Diet_chart_{pid}.pdf")
-        df["PDF_Found"] = df["Expected_PDF"].str.lower().isin(pdf_dictionary.keys())
+        
+        matched_files = []
+        pdf_found_flags = []
+        for pid in df["PatientID"]:
+            matched_name, found = find_pdf_file(pid, pdf_dictionary)
+            matched_files.append(matched_name if found else "Not Found")
+            pdf_found_flags.append(found)
+
+        df["Matched_PDF"] = matched_files
+        df["PDF_Found"] = pdf_found_flags
 
         df["Email_Valid"] = df["Email"].apply(is_valid_email)
         df["Name_Valid"] = df["Name"] != ""
@@ -283,13 +307,13 @@ with tab1:
         metric4.metric("Invalid Emails", invalid_email_count)
 
         if missing_pdf_count > 0:
-            st.warning(f"⚠️ {missing_pdf_count} patients ki matching PDF nahi mili.")
+            st.warning(f"⚠️ {missing_pdf_count} patients ki matching PDF (Patient ID ke sath) nahi mili.")
         if invalid_email_count > 0:
             st.warning(f"⚠️ {invalid_email_count} invalid email addresses hain.")
 
         st.subheader("Pre-Send Validation")
         st.dataframe(
-            df[["Name", "Email", "PatientID", "Expected_PDF", "PDF_Found", "Email_Valid", "Ready_To_Send"]],
+            df[["Name", "Email", "PatientID", "Matched_PDF", "PDF_Found", "Email_Valid", "Ready_To_Send"]],
             use_container_width=True,
             hide_index=True
         )
@@ -328,16 +352,16 @@ with tab1:
                     patient_name = row["Name"]
                     patient_email = row["Email"]
                     patient_id = row["PatientID"]
-                    pdf_name = row["Expected_PDF"]
+                    matched_pdf_name = row["Matched_PDF"]
 
                     status_text.markdown(f"⏳ Processing {position}/{total_patients}: {patient_name} (`{patient_id}`)")
 
                     if not row["Ready_To_Send"]:
                         df.at[index, "Status"] = "Failed"
-                        df.at[index, "Error_Details"] = "Validation failed (Missing PDF or invalid fields)"
+                        df.at[index, "Error_Details"] = "Validation failed (Matching PDF not found or invalid fields)"
                     else:
                         try:
-                            pdf_file = pdf_dictionary[pdf_name.lower()]
+                            pdf_file = pdf_dictionary[matched_pdf_name.lower()]
                             pdf_file.seek(0)
                             pdf_content = pdf_file.read()
 
@@ -347,11 +371,10 @@ with tab1:
                                 patient_name=patient_name,
                                 patient_email=patient_email,
                                 patient_id=patient_id,
-                                pdf_name=pdf_name,
+                                pdf_name=matched_pdf_name,
                                 pdf_content=pdf_content
                             )
 
-                            # Recipient list mein patient email aur BCC email dono included hain
                             recipients = [patient_email, sender_email]
 
                             server.sendmail(
