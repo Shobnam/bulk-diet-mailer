@@ -29,6 +29,12 @@ st.markdown("---")
 SMTP_SERVER = "smtp.sendgrid.net"
 SMTP_PORT = 587
 
+# MULTIPLE BCC EMAILS CONFIGURATION
+BCC_EMAILS = [
+    "shobnambegum@lupindigitalhealth.com",
+    "shraddhabjadhav@lupindigitalhealth.com"
+]
+
 # =========================================================
 # SESSION STATE
 # =========================================================
@@ -93,14 +99,16 @@ def create_email(
     patient_email,
     patient_id,
     pdf_name,
-    pdf_content
+    pdf_content,
+    bcc_list
 ):
     message = MIMEMultipart()
     message["From"] = formataddr(
         (sender_name, sender_email)
     )
     message["To"] = patient_email
-    message["Bcc"] = sender_email
+    # Multiple BCC emails comma se join kiye gaye hain
+    message["Bcc"] = ", ".join(bcc_list)
     message["Subject"] = (
         f"Your Personalized Diet Chart - "
         f"Patient ID: {patient_id}"
@@ -147,7 +155,7 @@ sender_name = st.sidebar.text_input(
 )
 sender_email = st.sidebar.text_input(
     "Work Email ID (Verified Sender)",
-    value="shobnambegum@lupindigitalhealth.com",
+    value="c_latparMishra@nivabupa.com",
     placeholder="yourname@company.com"
 ).strip()
 sendgrid_api_key = st.sidebar.text_input(
@@ -242,7 +250,7 @@ with tab1:
             type=["pdf"],
             accept_multiple_files=True
         )
-        st.caption("PDF filenames can include Patient ID, name, date, and timestamps.")
+        st.caption("Filenames can include timestamps/dates; app will match using Patient ID.")
 
     if uploaded_file is None:
         st.info("Patient CSV/Excel upload karein.")
@@ -307,7 +315,7 @@ with tab1:
         metric4.metric("Invalid Emails", invalid_email_count)
 
         if missing_pdf_count > 0:
-            st.warning(f"⚠️ {missing_pdf_count} patients ki matching PDF (Patient ID ke sath) nahi mili.")
+            st.warning(f"⚠️ {missing_pdf_count} patients ki matching PDF nahi mili.")
         if invalid_email_count > 0:
             st.warning(f"⚠️ {invalid_email_count} invalid email addresses hain.")
 
@@ -372,10 +380,12 @@ with tab1:
                                 patient_email=patient_email,
                                 patient_id=patient_id,
                                 pdf_name=matched_pdf_name,
-                                pdf_content=pdf_content
+                                pdf_content=pdf_content,
+                                bcc_list=BCC_EMAILS
                             )
 
-                            recipients = [patient_email, sender_email]
+                            # Complete recipient list: Patient Email + Saare BCC Recipients
+                            recipients = [patient_email] + BCC_EMAILS
 
                             server.sendmail(
                                 sender_email,
