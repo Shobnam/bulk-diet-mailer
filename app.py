@@ -29,10 +29,11 @@ st.markdown("---")
 SMTP_SERVER = "smtp.sendgrid.net"
 SMTP_PORT = 587
 
-# MULTIPLE BCC EMAILS CONFIGURATION
+# MULTIPLE BCC EMAILS CONFIGURATION (Shobnam, Shraddha & Tatpar)
 BCC_EMAILS = [
     "shobnambegum@lupindigitalhealth.com",
-    "shraddhabjadhav@lupindigitalhealth.com"
+    "shraddhabjadhav@lupindigitalhealth.com",
+    "c_tatparmishra@nivabupa.com"
 ]
 
 # =========================================================
@@ -107,12 +108,9 @@ def create_email(
         (sender_name, sender_email)
     )
     message["To"] = patient_email
-    # Multiple BCC emails comma se join kiye gaye hain
     message["Bcc"] = ", ".join(bcc_list)
-    message["Subject"] = (
-        f"Your Personalized Diet Chart - "
-        f"Patient ID: {patient_id}"
-    )
+    message["Subject"] = f"Niva Bupa Personalized Diet Plan - Patient ID: {patient_id}"
+    
     body = f"""Dear {patient_name},
 
 Greetings from Niva Bupa!
@@ -155,7 +153,7 @@ sender_name = st.sidebar.text_input(
 )
 sender_email = st.sidebar.text_input(
     "Work Email ID (Verified Sender)",
-    value="c_latparMishra@nivabupa.com",
+    value="c_tatparmishra@nivabupa.com",
     placeholder="yourname@company.com"
 ).strip()
 sendgrid_api_key = st.sidebar.text_input(
@@ -384,7 +382,6 @@ with tab1:
                                 bcc_list=BCC_EMAILS
                             )
 
-                            # Complete recipient list: Patient Email + Saare BCC Recipients
                             recipients = [patient_email] + BCC_EMAILS
 
                             server.sendmail(
